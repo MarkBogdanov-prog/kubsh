@@ -26,6 +26,7 @@ private:
     void handleTestUserCreate(const std::vector<std::string>& args);
     void handleListPartitions(const std::vector<std::string>& args);
     void handleContainerMode(const std::vector<std::string>& args);
+    void handleFuseTest(const std::vector<std::string>& args);
 
 public:
     Shell();

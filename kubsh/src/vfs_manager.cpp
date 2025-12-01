@@ -13,6 +13,7 @@
 #include <chrono>
 #include <set>
 #include <fcntl.h>
+#include <sys/file.h>
 
 VFSManager::VFSManager() {
     users_dir = "/opt/users";
@@ -29,7 +30,9 @@ void VFSManager::writeFile(const std::string& path, const std::string& content) 
     std::ofstream file(path);
     if (file.is_open()) {
         file << content;
+        file.flush(); // Принудительная запись
         file.close();
+        sync(); // Синхронизация с диском
     }
 }
 
@@ -59,21 +62,30 @@ bool VFSManager::isPasswdWritable() {
 void VFSManager::createUserInAlternativePasswd(const std::string& username, const std::string& user_id, 
                                               const std::string& user_home, const std::string& user_shell) {
     std::string alt_passwd = users_dir + "/passwd.db";
-    std::ofstream file(alt_passwd, std::ios::app);
-    if (file.is_open()) {
-        file << username << ":x:" << user_id << ":" << user_id << "::" << user_home << ":" << user_shell << "\n";
-        file.close();
-        std::cout << "User added to alternative database: " << username << std::endl;
-        
-        // Также создаем запись в группе
-        std::string alt_group = users_dir + "/group.db";
-        std::ofstream group_file(alt_group, std::ios::app);
-        if (group_file.is_open()) {
-            group_file << username << ":x:" << user_id << ":\n";
-            group_file.close();
+    
+    // Используем файловую блокировку для предотвращения гонок
+    int fd = open(alt_passwd.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        // Пытаемся заблокировать файл
+        if (flock(fd, LOCK_EX) == 0) {
+            std::string entry = username + ":x:" + user_id + ":" + user_id + "::" + user_home + ":" + user_shell + "\n";
+            ssize_t written = write(fd, entry.c_str(), entry.length());
+            if (written > 0) {
+                fsync(fd); // Принудительная синхронизация
+                std::cout << "User added to alternative database: " << username << std::endl;
+            }
+            flock(fd, LOCK_UN); // Снимаем блокировку
         }
-    } else {
-        std::cout << "Warning: Cannot write to alternative database" << std::endl;
+        close(fd);
+    }
+    
+    // Также создаем запись в группе
+    std::string alt_group = users_dir + "/group.db";
+    std::ofstream group_file(alt_group, std::ios::app);
+    if (group_file.is_open()) {
+        group_file << username << ":x:" << user_id << ":\n";
+        group_file.flush();
+        group_file.close();
     }
 }
 
@@ -128,17 +140,25 @@ void VFSManager::createUserInPasswd(const std::string& username, const std::stri
         user_shell = "/bin/bash";
     }
     
-    // Пытаемся записать в /etc/passwd
+    // Пытаемся записать в /etc/passwd с таймаутом
     if (isPasswdWritable()) {
-        int fd = open("/etc/passwd", O_WRONLY | O_APPEND | O_CREAT, 0644);
+        int fd = open("/etc/passwd", O_WRONLY | O_APPEND);
         if (fd >= 0) {
-            std::string entry = username + ":x:" << user_id << ":" << user_id << "::" << user_home << ":" << user_shell << "\n";
-            ssize_t written = write(fd, entry.c_str(), entry.length());
-            if (written > 0) {
-                fsync(fd);
-                std::cout << "User added to /etc/passwd: " << username << std::endl;
+            // Блокируем файл для предотвращения гонок
+            if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+                std::string entry = username + ":x:" + user_id + ":" + user_id + "::" + user_home + ":" + user_shell + "\n";
+                ssize_t written = write(fd, entry.c_str(), entry.length());
+                if (written > 0) {
+                    fsync(fd); // Принудительная синхронизация
+                    std::cout << "User added to /etc/passwd: " << username << std::endl;
+                } else {
+                    std::cout << "Warning: Write to /etc/passwd failed, using alternative database" << std::endl;
+                    createUserInAlternativePasswd(username, user_id, user_home, user_shell);
+                }
+                flock(fd, LOCK_UN);
             } else {
-                std::cout << "Warning: Write to /etc/passwd failed, using alternative database" << std::endl;
+                // Если не удалось заблокировать файл, используем альтернативную базу
+                std::cout << "Cannot lock /etc/passwd, using alternative database" << std::endl;
                 createUserInAlternativePasswd(username, user_id, user_home, user_shell);
             }
             close(fd);
@@ -157,7 +177,7 @@ void VFSManager::startInstantSync() {
         // Немедленная синхронизация при запуске
         syncVFSUsers();
         
-        // Бесконечный цикл с минимальной задержкой
+        // Цикл синхронизации с увеличенными задержками
         while (true) {
             DIR* dir = opendir(users_dir.c_str());
             if (dir) {
@@ -175,8 +195,8 @@ void VFSManager::startInstantSync() {
                 }
                 closedir(dir);
             }
-            // Абсолютно минимальная задержка
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            // Увеличиваем задержку для стабильности
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }).detach();
 }
@@ -225,7 +245,7 @@ void VFSManager::initialize() {
         createUserDirectory(user);
     }
 
-    // Запускаем мгновенную синхронизацию
+    // Запускаем мгновенную синхронизацию с увеличенной задержкой
     startInstantSync();
 
     std::cout << "VFS initialized at: " << users_dir << std::endl;

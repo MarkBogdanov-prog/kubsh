@@ -1,39 +1,114 @@
-.PHONY: all debug release run deb clean test
+# Makefile for kubsh package with C++ compilation
 
-all: release
+# Compiler settings
+CXX = g++
+CXXFLAGS = -std=c++17 -O2 -Wall -Wno-unused-parameter
+FUSE_CXXFLAGS = -std=c++17 -O2 -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=31
 
-debug:
-	mkdir -p build
-	g++ -std=c++17 -g -DDEBUG -pthread -o build/kubsh src/main.cpp src/shell.cpp src/vfs_manager.cpp
+# Package settings
+PACKAGE_NAME = kubsh
+VERSION = 1.0.0
+ARCH = amd64
+BUILD_DIR = build
+DEB_DIR = $(BUILD_DIR)/$(PACKAGE_NAME)-$(VERSION)
+CONTROL_DIR = $(DEB_DIR)/DEBIAN
+BIN_DIR = $(DEB_DIR)/usr/local/bin
+MAN_DIR = $(DEB_DIR)/usr/share/man/man1
 
-release:
-	mkdir -p build
-	g++ -std=c++17 -O2 -pthread -o build/kubsh src/main.cpp src/shell.cpp src/vfs_manager.cpp
+# Source files - adjust these paths to match your actual source structure
+# Пример структуры, измените под ваш проект
+SRC_DIR = src
+SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
+HEADERS = $(wildcard $(SRC_DIR)/*.hpp) $(wildcard $(SRC_DIR)/*.h)
 
-run: release
-	./build/kubsh
+# Target binary
+TARGET = $(BUILD_DIR)/kubsh
 
-deb: release
-	mkdir -p kubsh/usr/local/bin
-	mkdir -p kubsh/DEBIAN
-	cp build/kubsh kubsh/usr/local/bin/
-	chmod 755 kubsh/usr/local/bin/kubsh
+# FUSE libraries (adjust if needed)
+FUSE_LIBS = -lfuse3 -lreadline
+
+# Default target
+all: build
+
+# Build the binary
+$(TARGET): $(SOURCES) $(HEADERS)
+	@echo "Compiling kubsh..."
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(FUSE_CXXFLAGS) $(SOURCES) -o $(TARGET) $(FUSE_LIBS)
+	@echo "Build complete"
+
+build: $(TARGET)
+
+# Create .deb package
+deb: build
+	@echo "Creating .deb package structure..."
 	
-	echo "Package: kubsh" > kubsh/DEBIAN/control
-	echo "Version: 1.0" >> kubsh/DEBIAN/control
-	echo "Section: utils" >> kubsh/DEBIAN/control
-	echo "Priority: optional" >> kubsh/DEBIAN/control
-	echo "Architecture: amd64" >> kubsh/DEBIAN/control
-	echo "Maintainer: kubsh developer" >> kubsh/DEBIAN/control
-	echo "Description: Custom shell implementation" >> kubsh/DEBIAN/control
+	# Clean previous package if exists
+	@rm -f $(PACKAGE_NAME).deb
 	
-	chmod 644 kubsh/DEBIAN/control
-	dpkg-deb --build kubsh
-	mv kubsh.deb kubsh_1.0_amd64.deb
+	# Create directory structure
+	@mkdir -p $(CONTROL_DIR)
+	@mkdir -p $(BIN_DIR)
+	@mkdir -p $(MAN_DIR)
+	
+	# Copy binary
+	cp $(TARGET) $(BIN_DIR)/
+	
+	# Create control file
+	@echo "Package: $(PACKAGE_NAME)" > $(CONTROL_DIR)/control
+	@echo "Version: $(VERSION)" >> $(CONTROL_DIR)/control
+	@echo "Architecture: $(ARCH)" >> $(CONTROL_DIR)/control
+	@echo "Maintainer: kubsh maintainer <maintainer@example.com>" >> $(CONTROL_DIR)/control
+	@echo "Section: utils" >> $(CONTROL_DIR)/control
+	@echo "Priority: optional" >> $(CONTROL_DIR)/control
+	@echo "Depends: fuse3, libreadline8" >> $(CONTROL_DIR)/control
+	@echo "Description: Kubernetes shell utility" >> $(CONTROL_DIR)/control
+	@echo " A utility for working with Kubernetes shells" >> $(CONTROL_DIR)/control
+	
+	# Create postinst script for FUSE group setup
+	@echo "#!/bin/bash" > $(CONTROL_DIR)/postinst
+	@echo "# Post-installation script for kubsh" >> $(CONTROL_DIR)/postinst
+	@echo "set -e" >> $(CONTROL_DIR)/postinst
+	@echo "# Ensure user is in fuse group to use FUSE" >> $(CONTROL_DIR)/postinst
+	@echo "# echo 'To use kubsh, you may need to add your user to the fuse group:'" >> $(CONTROL_DIR)/postinst
+	@echo "# echo '  sudo usermod -aG fuse $$USER'" >> $(CONTROL_DIR)/postinst
+	@echo "# echo 'Then log out and log back in.'" >> $(CONTROL_DIR)/postinst
+	chmod +x $(CONTROL_DIR)/postinst
+	
+	# Create prerm script
+	@echo "#!/bin/bash" > $(CONTROL_DIR)/prerm
+	@echo "# Pre-removal script" >> $(CONTROL_DIR)/prerm
+	@echo "set -e" >> $(CONTROL_DIR)/prerm
+	chmod +x $(CONTROL_DIR)/prerm
+	
+	# Set permissions
+	chmod 755 $(BIN_DIR)/kubsh
+	
+	# Build the .deb package
+	dpkg-deb --build $(DEB_DIR) $(PACKAGE_NAME).deb
+	
+	@echo ".deb package created: $(PACKAGE_NAME).deb"
+	@echo "To install: sudo dpkg -i $(PACKAGE_NAME).deb"
 
+# Install locally (for testing)
+install: deb
+	sudo dpkg -i $(PACKAGE_NAME).deb || sudo apt-get install -f
+
+# Clean build artifacts
 clean:
-	rm -rf build kubsh kubsh.deb kubsh_1.0_amd64.deb
+	rm -rf $(BUILD_DIR)
+	rm -f $(PACKAGE_NAME).deb
+	rm -f *.deb
 
-test: release
-	echo "Testing basic functionality..."
-	./build/kubsh --version || echo "No version flag"
+# Debug build
+debug: CXXFLAGS += -g -DDEBUG
+debug: FUSE_CXXFLAGS += -g -DDEBUG
+debug: clean build
+
+# Show source files
+sources:
+	@echo "Sources: $(SOURCES)"
+	@echo "Headers: $(HEADERS)"
+
+# PHONY targets
+.PHONY: all build deb install clean debug sources

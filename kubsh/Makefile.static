@@ -1,0 +1,13 @@
+# Статическая сборка etc_fuse
+CXX = g++
+CXXFLAGS = -std=c++17 -O2 -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=31
+STATIC_LIBS = -static -lfuse3 -lpthread -ldl
+
+all: build/etc_fuse_static
+
+build/etc_fuse_static: src/etc_fuse.cpp
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $< $(STATIC_LIBS)
+
+clean:
+	rm -f build/etc_fuse_static

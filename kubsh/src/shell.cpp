@@ -26,7 +26,7 @@ void sighup_handler(int sig) {
     std::cout << "Configuration reloaded" << std::endl;
 }
 
-Shell::Shell() : running(true) {
+Shell::Shell() : running(true), vfs_manager(nullptr) {
     const char* home = std::getenv("HOME");
     if (home) {
         history_file = std::string(home) + "/.kubsh_history";
@@ -43,7 +43,9 @@ Shell::Shell() : running(true) {
 }
 
 Shell::~Shell() {
-    delete vfs_manager;
+    if (vfs_manager) {
+        delete vfs_manager;
+    }
 }
 
 void Shell::setupSignalHandlers() {
@@ -165,7 +167,11 @@ void Shell::handleEnv(const std::vector<std::string>& args) {
 void Shell::handleUserCreate(const std::vector<std::string>& args) {
     if (args.size() == 2) {
         std::string username = args[1];
-        vfs_manager->createUser(username);
+        if (vfs_manager) {
+            vfs_manager->createUser(username);
+        } else {
+            std::cout << "VFS manager not initialized" << std::endl;
+        }
     } else {
         std::cout << "Usage: useradd <username>" << std::endl;
     }
@@ -234,7 +240,7 @@ void Shell::handleContainerMode(const std::vector<std::string>& args) {
     }
     
     // Проверяем доступность /etc/passwd для записи
-    if (vfs_manager->isPasswdWritable()) {
+    if (vfs_manager && vfs_manager->isPasswdWritable()) {
         std::cout << "/etc/passwd is WRITABLE" << std::endl;
         std::cout << "Mode: Direct system integration" << std::endl;
     } else {
@@ -247,12 +253,28 @@ void Shell::handleContainerMode(const std::vector<std::string>& args) {
     struct stat st;
     if (stat(alt_passwd.c_str(), &st) == 0) {
         std::cout << "Alternative user database: EXISTS (" << st.st_size << " bytes)" << std::endl;
+        
+        // Показываем несколько пользователей из альтернативной базы
+        std::ifstream db_file(alt_passwd);
+        if (db_file.is_open()) {
+            std::string line;
+            int count = 0;
+            std::cout << "Users in alternative database:" << std::endl;
+            while (std::getline(db_file, line) && count < 5) {
+                size_t colon = line.find(':');
+                if (colon != std::string::npos) {
+                    std::cout << "  " << line.substr(0, colon) << std::endl;
+                    count++;
+                }
+            }
+            db_file.close();
+        }
     } else {
         std::cout << "Alternative user database: NOT CREATED YET" << std::endl;
     }
     
     std::cout << "\nRecommendations:" << std::endl;
-    if (!vfs_manager->isPasswdWritable()) {
+    if (vfs_manager && !vfs_manager->isPasswdWritable()) {
         std::cout << "- Users will be created in /opt/users/passwd.db" << std::endl;
         std::cout << "- Use 'cat /opt/users/passwd.db' to view users" << std::endl;
     } else {
@@ -504,12 +526,70 @@ void Shell::handleListPartitions(const std::vector<std::string>& args) {
     }
 }
 
+// Новая функция для тестирования FUSE user management
+void Shell::handleFuseTest(const std::vector<std::string>& args) {
+    std::cout << "=== FUSE User Management Test ===" << std::endl;
+    
+    // Проверяем доступность FUSE mount
+    if (access("/mnt/etc/passwd", F_OK) == 0) {
+        std::cout << "✓ FUSE mount is accessible at /mnt/etc/passwd" << std::endl;
+        
+        // Читаем текущее содержимое
+        std::ifstream fuse_file("/mnt/etc/passwd");
+        if (fuse_file.is_open()) {
+            std::string line;
+            int user_count = 0;
+            while (std::getline(fuse_file, line)) {
+                user_count++;
+            }
+            fuse_file.close();
+            std::cout << "✓ Current user count in FUSE: " << user_count << std::endl;
+        }
+        
+        // Создаем тестового пользователя через FUSE
+        std::string test_user = "fusetest_" + std::to_string(getpid());
+        std::string user_entry = test_user + ":x:9999:9999::/home/" + test_user + ":/bin/bash\n";
+        
+        std::ofstream out_file("/mnt/etc/passwd", std::ios::app);
+        if (out_file.is_open()) {
+            out_file << user_entry;
+            out_file.close();
+            std::cout << "✓ Test user created via FUSE: " << test_user << std::endl;
+            
+            // Проверяем, что пользователь появился в VFS
+            sleep(1); // Даем время для обработки
+            std::string user_dir = "/opt/users/" + test_user;
+            if (access(user_dir.c_str(), F_OK) == 0) {
+                std::cout << "✓ User directory created in VFS: " << user_dir << std::endl;
+                
+                // Проверяем файлы пользователя
+                if (access((user_dir + "/id").c_str(), F_OK) == 0) {
+                    std::cout << "✓ User ID file created" << std::endl;
+                }
+                if (access((user_dir + "/home").c_str(), F_OK) == 0) {
+                    std::cout << "✓ User home file created" << std::endl;
+                }
+                if (access((user_dir + "/shell").c_str(), F_OK) == 0) {
+                    std::cout << "✓ User shell file created" << std::endl;
+                }
+            } else {
+                std::cout << "✗ User directory not created in VFS" << std::endl;
+            }
+        } else {
+            std::cout << "✗ Cannot write to FUSE mount" << std::endl;
+        }
+    } else {
+        std::cout << "✗ FUSE mount not accessible at /mnt/etc/passwd" << std::endl;
+        std::cout << "Make sure FUSE filesystem is mounted with: ./build/etc_fuse /mnt/etc" << std::endl;
+    }
+}
+
 bool Shell::executeBuiltinCommand(const std::vector<std::string>& args) {
     if (args.empty()) return false;
 
     std::string command = args[0];
 
-    if (command == "\\q") {
+    if (command == "\\q" || command == "exit") {
         running = false;
         return true;
     }
@@ -517,7 +597,7 @@ bool Shell::executeBuiltinCommand(const std::vector<std::string>& args) {
         handleEcho(args);
         return true;
     }
-    else if (command == "\\e") {
+    else if (command == "\\e" || command == "env") {
         handleEnv(args);
         return true;
     }
@@ -529,12 +609,27 @@ bool Shell::executeBuiltinCommand(const std::vector<std::string>& args) {
         handleTestUserCreate(args);
         return true;
     }
-    else if (command == "\\l") {
+    else if (command == "\\l" || command == "list") {
         handleListPartitions(args);
         return true;
     }
-    else if (command == "\\container") {
+    else if (command == "\\container" || command == "container") {
         handleContainerMode(args);
+        return true;
+    }
+    else if (command == "\\fuse_test" || command == "fuse_test") {
+        handleFuseTest(args);
+        return true;
+    }
+    else if (command == "history") {
+        std::cout << "Command history (" << history.size() << " commands):" << std::endl;
+        for (size_t i = 0; i < history.size(); ++i) {
+            std::cout << "  " << (i + 1) << ": " << history[i] << std::endl;
+        }
+        return true;
+    }
+    else if (command == "clear") {
+        std::cout << "\033[2J\033[1;1H"; // ANSI escape codes to clear screen
         return true;
     }
 

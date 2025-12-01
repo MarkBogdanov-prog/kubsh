@@ -1,0 +1,9 @@
+Package: kubsh
+Version: 1.0.0
+Architecture: amd64
+Maintainer: kubsh maintainer <maintainer@example.com>
+Section: utils
+Priority: optional
+Depends: fuse3, libreadline8
+Description: Kubernetes shell utility
+ A utility for working with Kubernetes shells
